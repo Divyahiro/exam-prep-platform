@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -9,6 +11,14 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// ✅ RAZORPAY CONFIGURATION
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_YOUR_KEY',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || 'your_secret'
+});
+
+console.log('💰 Razorpay:', process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured');
 
 // ✅ DEEPSEEK API CONFIGURATION
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'your_api_key_here';
@@ -47,11 +57,82 @@ app.get('/health', async (req, res) => {
         status: 'ok',
         timestamp: new Date(),
         deepseek_api: apiStatus ? 'connected' : 'disconnected',
+        razorpay: process.env.RAZORPAY_KEY_ID ? 'configured' : 'not_configured',
         message: 'Exam Prep Platform API is running'
     });
 });
 
-// ✅ 1. GENERATE QUESTION WITH DEEPSEEK
+// ========== PAYMENT ENDPOINTS ==========
+
+// 1. CREATE RAZORPAY ORDER
+app.post('/api/create-order', async (req, res) => {
+  try {
+    const { amount, plan = 'monthly' } = req.body;
+    
+    const options = {
+      amount: amount * 100, // Razorpay expects paise
+      currency: 'INR',
+      receipt: `receipt_${Date.now()}`,
+      notes: { 
+        plan: plan,
+        platform: 'ExamPrep AI',
+        date: new Date().toISOString()
+      }
+    };
+
+    const order = await razorpay.orders.create(options);
+    
+    res.json({
+      success: true,
+      order_id: order.id,
+      amount: order.amount,
+      currency: order.currency
+    });
+  } catch (error) {
+    console.error('❌ Razorpay order error:', error.message);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to create order',
+      message: error.message 
+    });
+  }
+});
+
+// 2. VERIFY PAYMENT SIGNATURE
+app.post('/api/verify-payment', (req, res) => {
+  try {
+    const { order_id, payment_id, signature } = req.body;
+    const secret = process.env.RAZORPAY_KEY_SECRET || 'your_secret';
+    
+    const generated_signature = crypto
+      .createHmac('sha256', secret)
+      .update(order_id + "|" + payment_id)
+      .digest('hex');
+    
+    if (generated_signature === signature) {
+      res.json({ 
+        success: true, 
+        message: 'Payment verified successfully! Premium activated.',
+        premium_activated: true,
+        activated_at: new Date()
+      });
+    } else {
+      res.status(400).json({ 
+        success: false, 
+        message: 'Payment verification failed' 
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+// ========== AI ENDPOINTS ==========
+
+// 1. GENERATE QUESTION WITH DEEPSEEK
 app.post('/api/generate-question', async (req, res) => {
     try {
         const { examType = 'JEE', subject = 'Mathematics', difficulty = 'medium', topic = 'Algebra' } = req.body;
@@ -108,7 +189,7 @@ app.post('/api/generate-question', async (req, res) => {
     }
 });
 
-// ✅ 2. SOLVE DOUBT WITH DEEPSEEK
+// 2. SOLVE DOUBT WITH DEEPSEEK
 app.post('/api/solve-doubt', async (req, res) => {
     try {
         const { question, subject = 'General', studentGrade = '12th' } = req.body;
@@ -162,7 +243,7 @@ app.post('/api/solve-doubt', async (req, res) => {
     }
 });
 
-// ✅ 3. GENERATE MOCK TEST
+// 3. GENERATE MOCK TEST
 app.post('/api/generate-test', async (req, res) => {
     try {
         const { examType = 'JEE Mains', subject = 'Physics', count = 5 } = req.body;
@@ -209,7 +290,7 @@ app.post('/api/generate-test', async (req, res) => {
             subject,
             totalQuestions: questions.length,
             totalMarks: questions.reduce((sum, q) => sum + (q.marks || 4), 0),
-            duration: questions.length * 1.5, // 1.5 minutes per question
+            duration: questions.length * 1.5,
             questions: questions,
             generatedAt: new Date()
         });
@@ -224,7 +305,7 @@ app.post('/api/generate-test', async (req, res) => {
     }
 });
 
-// ✅ 4. EXPLAIN CONCEPT
+// 4. EXPLAIN CONCEPT
 app.post('/api/explain-concept', async (req, res) => {
     try {
         const { concept, subject = 'Science', level = 'Intermediate' } = req.body;
@@ -268,7 +349,7 @@ app.post('/api/explain-concept', async (req, res) => {
     }
 });
 
-// ✅ 5. FALLBACK QUESTIONS (If API fails)
+// 5. FALLBACK QUESTIONS (If API fails)
 function getFallbackQuestion() {
     const fallbackQuestions = [
         {
@@ -300,9 +381,9 @@ function getFallbackQuestion() {
     return fallbackQuestions[Math.floor(Math.random() * fallbackQuestions.length)];
 }
 
-// ✅ 6. RATE LIMITER (Free tier protection)
+// 6. RATE LIMITER (Free tier protection)
 const requestCounts = {};
-const RATE_LIMIT = 100; // 100 requests per minute (DeepSeek free limit)
+const RATE_LIMIT = 100;
 
 app.use((req, res, next) => {
     const ip = req.ip;
@@ -313,7 +394,6 @@ app.use((req, res, next) => {
         requestCounts[ip] = [];
     }
     
-    // Clean old requests
     requestCounts[ip] = requestCounts[ip].filter(time => time > oneMinuteAgo);
     
     if (requestCounts[ip].length >= RATE_LIMIT) {
@@ -327,7 +407,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// ✅ 7. SAMPLE DATA ENDPOINT (No API key needed)
+// 7. SAMPLE DATA ENDPOINT (No API key needed)
 app.get('/api/sample-questions', (req, res) => {
     const samples = [
         getFallbackQuestion(),
@@ -350,7 +430,7 @@ app.get('/api/sample-questions', (req, res) => {
     res.json(samples);
 });
 
-// ✅ 8. DATABASE CONNECTION (Optional - MongoDB)
+// 8. DATABASE CONNECTION (Optional)
 async function connectDB() {
     try {
         if (process.env.MONGODB_URI) {
@@ -361,7 +441,7 @@ async function connectDB() {
         }
     } catch (error) {
         console.log('⚠️  MongoDB connection failed:', error.message);
-        console.log('ℹ️  Continuing without database - using memory storage');
+        console.log('ℹ️  Continuing without database');
     }
 }
 
@@ -380,26 +460,26 @@ async function startServer() {
         🔗 Local: http://localhost:${PORT}
         🔗 Health: http://localhost:${PORT}/health
         🔑 DeepSeek: ${DEEPSEEK_API_KEY ? '✅ Configured' : '❌ Not Configured'}
+        💰 Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✅ Configured' : '❌ Not Configured'}
         💾 Database: ${process.env.MONGODB_URI ? '✅ Connected' : '❌ Not Connected'}
         ====================================
         
         📚 Available Endpoints:
         GET  /health                    - Check server status
         GET  /api/sample-questions      - Get sample questions
+        POST /api/create-order          - Create Razorpay order
+        POST /api/verify-payment        - Verify payment
         POST /api/generate-question     - Generate AI question
         POST /api/solve-doubt           - Solve student doubt
-        POST /api/generate-test         - Generate mock test
-        POST /api/explain-concept       - Explain any concept
         
-        ⚠️  IMPORTANT: Add your DeepSeek API key to .env file!
-        DEEPSEEK_API_KEY=your_key_here
+        💳 Test Card: 4111 1111 1111 1111 | CVV: Any | Expiry: Any future
+        ====================================
         `);
     });
 }
 
 startServer();
 
-// ✅ Handle shutdown gracefully
 process.on('SIGINT', () => {
     console.log('👋 Server shutting down...');
     process.exit(0);
